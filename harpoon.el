@@ -81,14 +81,17 @@ Returns the project name as a string, or nil if there is no project."
 
 (defun harpoon--get-branch-name ()
   "Get the branch name for harpoon.
-Uses `harpoon-git-branch-provider' to determine the method."
+Uses `harpoon-git-branch-provider' to determine the method.
+Returns nil if not in a git repository."
   (cond
    ((eq harpoon-git-branch-provider 'magit)
     (magit-get-current-branch))
    ((eq harpoon-git-branch-provider 'git)
-    (string-trim
-     (shell-command-to-string
-      (concat "cd " (harpoon--get-project-root) "; git rev-parse --abbrev-ref HEAD"))))))
+    (condition-case nil
+        (string-trim
+         (shell-command-to-string
+          (concat "cd " (harpoon--get-project-root) "; git rev-parse --abbrev-ref HEAD")))
+      (error nil)))))
 
 (defun harpoon--cache-key ()
   "Key to save current file on cache.
@@ -97,8 +100,8 @@ Returns nil if there is no project."
   ;; filename-friendly by escaping "/" and other forbidden characters.
   (when-let ((project-name (harpoon--get-project-name)))
     (url-hexify-string
-     (if harpoon-separate-by-branch
-         (concat project-name "#" (harpoon--get-branch-name))
+     (if-let ((branch (and harpoon-separate-by-branch (harpoon--get-branch-name))))
+         (concat project-name "#" branch)
        project-name))))
 
 (defun harpoon--cache-file-name ()
