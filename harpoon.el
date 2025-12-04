@@ -143,7 +143,7 @@ DATA should be a list of alists with `harpoon_position' and `filepath' keys.
 Entries are sorted by `harpoon_position' in increasing order before writing.
 Creates the cache file if it does not exist."
   (harpoon--ensure-cache-file)
-  (f-write-text (json-serialize (harpoon--sort-positions data)) 'utf-8 (harpoon--cache-file-name)))
+  (f-write-text (json-serialize (vconcat (harpoon--sort-positions data))) 'utf-8 (harpoon--cache-file-name)))
 
 (defun harpoon--get-filepath-by-position (harpoon-position)
   "Get the filepath for a given HARPOON-POSITION.
