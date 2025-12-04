@@ -6,7 +6,7 @@
 ;; Keywords: tools languages
 ;; Homepage: https://github.com/otavioschwanck/harpoon.el
 ;; Version: 0.5
-;; Package-Requires: ((emacs "27.2") (f "0.20.0") (hydra "0.14.0") (project "0.8.1"))
+;; Package-Requires: ((emacs "27.2") (f "0.20.0") (project "0.8.1"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -31,9 +31,6 @@
 ;;; Changelog
 ;;; 0.5
 ;;; Fix when project is not loaded
-;;;
-;;; 0.4
-;;; Added hydra support
 
 ;;; Code:
 (require 'f)
@@ -440,98 +437,10 @@ HARPOON-NUMBER: The position (1-9) to assign the current file to."
         (harpoon--set-filepath-by-number next-num file-to-add)
         (message "File added to harpoon at position %d." next-num)))))
 
-;;;###autoload
-(defun harpoon-quick-menu-hydra ()
-  "Open harpoon quick menu with hydra."
-  (interactive)
-  (require 'hydra)
-  (let ((candidates (harpoon--hydra-candidates "harpoon-go-to-")))
-    (eval `(defhydra harpoon-hydra (:exit t :column 1)
-             "
-
-        ██╗  ██╗ █████╗ ██████╗ ██████╗  ██████╗  ██████╗ ███╗   ██╗
-        ██║  ██║██╔══██╗██╔══██╗██╔══██╗██╔═══██╗██╔═══██╗████╗  ██║
-        ███████║███████║██████╔╝██████╔╝██║   ██║██║   ██║██╔██╗ ██║
-        ██╔══██║██╔══██║██╔══██╗██╔═══╝ ██║   ██║██║   ██║██║╚██╗██║
-        ██║  ██║██║  ██║██║  ██║██║     ╚██████╔╝╚██████╔╝██║ ╚████║
-        ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝      ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝
-                                                            "
-             ,@candidates
-             ("SPC" harpoon-toggle-quick-menu "Open Menu" :column "Other Actions")
-             ("d" harpoon-delete-item "Delete some harpoon" :column "Other Actions")
-             ("f" harpoon-toggle-file "Open Harpoon File" :column "Other Actions")
-             ("c" harpoon-clear "Clear Harpoon" :column "Other Actions")
-             ("s" harpoon-add-file "Save Current File to Harpoon" :column "Other Actions"))))
-
-  (when (fboundp 'harpoon-hydra/body) (harpoon-hydra/body)))
-
-
-(defun harpoon--hydra-candidates (method)
-  "Candidates for hydra. METHOD = Method to execute on harpoon item."
-  (let* ((data (harpoon--read-json))
-         (sorted-data (seq-sort (lambda (a b)
-                                  (< (alist-get 'harpoon_number a)
-                                     (alist-get 'harpoon_number b)))
-                                data))
-         (full-candidates (seq-take sorted-data 9)))
-    (mapcar (lambda (item)
-              (let ((num (alist-get 'harpoon_number item))
-                    (filepath (alist-get 'filepath item)))
-                (list (format "%s" num)
-                      (intern (concat method (format "%s" num)))
-                      (harpoon--format-item-name filepath)
-                      :column (if (< num 6) "1-5" "6-9"))))
-            full-candidates)))
-
-(defun harpoon--format-item-name (item)
-  "Format item on harpoon. ITEM = Item to be formated.
-FULL-CANDIDATES:  Candidates to be edited."
-  (if (string-match-p "/" item)
-      (let ((splitted-item (split-string item "/")))
-        (harpoon--already-includes-text item splitted-item)) item))
-
-(defun harpoon--already-includes-text (item splitted-item)
-  "Return the name to be used on hydra.
-ITEM = Full item.  SPLITTED-ITEM = Item splitted.
-FULL-CANDIDATES = All candidates to look."
-  (let ((file-base-name (nth (- (length splitted-item) 1) splitted-item))
-        (candidates (seq-take (harpoon--get-all-filepaths) 9)))
-    (if (member file-base-name (mapcar (lambda (x)
-                                         (nth (- (length (split-string x "/")) 1) (split-string x "/")))
-                                       (delete item candidates)))
-        (concat file-base-name " at " (string-join (butlast splitted-item) "/"))
-      file-base-name)))
-
-
-;;;###autoload
-(defun harpoon-delete-item ()
-  "Delete items on harpoon."
-  (interactive)
-  (let ((candidates (harpoon--hydra-candidates "harpoon-delete-")))
-    (eval `(defhydra harpoon-delete-hydra (:exit t :column 1 :color red)
-             "
-
-   /0000000\\
-   | 00000 |
-   | | | | |
-   | TRASH |
-   | | | | |
-   \\-------/
-
-Select items to delete:
-"
-             ,@candidates
-             ("SPC" harpoon-quick-menu-hydra "Back to harpoon" :column "Other Actions")
-             ("q" hydra-keyboard-quit "Quit" :column "Other Actions"))))
-
-  (when (fboundp 'harpoon-delete-hydra/body) (harpoon-delete-hydra/body)))
-
-
 (defun harpoon--package-name ()
   "Return harpoon package name."
   "harpoon")
 
-;;;###autoload
 ;;;###autoload
 (defun harpoon-toggle-file ()
   "Open harpoon JSON file for viewing/editing."
