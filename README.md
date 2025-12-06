@@ -45,10 +45,10 @@ In `config.el`:
 - `javelin-go-to-next` / `javelin-go-to-prev` - Cycle through files
 - `javelin-clear` - Clear all positions
 
-## Acknowledgments
-
-Based on [harpoon.el](https://github.com/otavioschwanck/harpoon.el) by Otavio Schwanck.
-
 ---
 
 <a href="https://buymeacoffee.com/thebitflipper" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+
+## Acknowledgments
+
+Based on [harpoon.el](https://github.com/otavioschwanck/harpoon.el) by Otavio Schwanck.
