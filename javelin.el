@@ -6,7 +6,7 @@
 ;; Author: Damian Barabonkov
 ;; Keywords: tools languages
 ;; Homepage: https://github.com/DamianB-BitFlipper/javelin.el
-;; Version: 0.1
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (f "0.20.0"))
 
 ;; This program is free software; you can redistribute it and/or modify
