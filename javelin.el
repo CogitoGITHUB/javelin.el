@@ -34,7 +34,10 @@
 (require 'f)
 (require 'subr-x)
 
+;;; Code:
+
 ;;; --- Customizable variables ---
+
 (defgroup javelin nil
   "Organize bookmarks by project and branch."
   :group 'tools)
@@ -422,7 +425,7 @@ JAVELIN-NUMBER: The position (1-9) to assign the current file to."
 (defun javelin-go-or-assign-to (javelin-number &optional force)
   "Go to javelin position if occupied, otherwise assign current buffer to it.
 JAVELIN-NUMBER: The position (1-9) to go to or assign.
-With FORCE (or prefix arg C-u), always assign even if position is occupied."
+With FORCE (or prefix arg \\[universal-argument]), always assign even if position is occupied."
   (if (and (not force) (javelin--get-filepath-by-position javelin-number))
       (javelin-go-to javelin-number)
     (javelin-assign-to javelin-number)))
@@ -432,63 +435,63 @@ With FORCE (or prefix arg C-u), always assign even if position is occupied."
 ;;;###autoload
 (defun javelin-go-or-assign-to-1 ()
   "Go to position 1 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 1 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-2 ()
   "Go to position 2 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 2 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-3 ()
   "Go to position 3 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 3 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-4 ()
   "Go to position 4 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 4 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-5 ()
   "Go to position 5 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 5 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-6 ()
   "Go to position 6 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 6 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-7 ()
   "Go to position 7 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 7 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-8 ()
   "Go to position 8 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 8 current-prefix-arg))
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-9 ()
   "Go to position 9 if occupied, otherwise assign current buffer to it.
-With prefix arg C-u, always assign even if position is occupied."
+With prefix arg \\[universal-argument], always assign even if position is occupied."
   (interactive)
   (javelin-go-or-assign-to 9 current-prefix-arg))
 
@@ -610,7 +613,7 @@ With prefix arg C-u, always assign even if position is occupied."
 (define-minor-mode javelin-minor-mode
   "Minor mode for quick file navigation with javelin.
 Provides keybindings for jumping to javelined files:
-  M-1 to M-9: Go to position (or assign if empty, C-u to force assign)
+  M-1 to M-9: Go to position (or assign if empty, \\[universal-argument] to force assign)
   M-0 0: Clear all positions
   M-0 1-9: Delete position
   M--: Toggle quick menu"
