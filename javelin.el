@@ -6,7 +6,7 @@
 ;; Author: Damian Barabonkov
 ;; Keywords: tools languages
 ;; Homepage: https://github.com/DamianB-BitFlipper/javelin.el
-;; Version: 0.1.1
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1"))
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -72,6 +72,16 @@ Can be `projectile' or `project'.")
 (defvar javelin-git-branch-provider (if (featurep 'magit) 'magit 'git)
   "Git branch provider to use for getting current branch.
 Can be `magit' or `git'.")
+
+(defvar javelin--markers (make-hash-table :test 'equal)
+  "Hash table mapping (filepath . javelin-position) to markers.
+Markers provide live position tracking within an Emacs session,
+automatically adjusting when text is inserted or deleted above them.")
+
+(defconst javelin--cache-version 1
+  "Current version of the javelin cache file schema.
+Increment this when making incompatible changes to the cache format.
+Cache files with a different version will be deleted and recreated.")
 
 (defun javelin--get-project-root ()
   "Get the project root.
@@ -141,9 +151,18 @@ Returns `javelin-default-positions-namespace' if there is no project."
                  (alist-get 'javelin_position b)))
             data))
 
+(defun javelin--cache-compatible-p (data)
+  "Check if DATA from cache file is compatible with the current schema.
+Returns non-nil if compatible, nil otherwise."
+  (and data
+       (listp data)
+       (alist-get 'version data)
+       (= (alist-get 'version data) javelin--cache-version)))
+
 (defun javelin--read-javelin-positions ()
   "Read and parse the javelin positions cache JSON file.
-Returns a list of alists with `javelin_position' and `filepath' keys."
+Returns a list of alists with `javelin_position', `filepath', and `point' keys.
+If the cache file is incompatible, it is deleted and an empty list is returned."
   (let ((data (if (file-exists-p (javelin--cache-file-name))
                   (condition-case nil
 		      (with-temp-buffer
@@ -154,44 +173,62 @@ Returns a list of alists with `javelin_position' and `filepath' keys."
                     ;; JSON file got corrupted, delete it and return empty list
                     (error
                      (delete-file (javelin--cache-file-name))
-                     '()))
-                '())))
-    (javelin--sort-positions data)))
+                     nil))
+                nil)))
+    (if (javelin--cache-compatible-p data)
+        (javelin--sort-positions (alist-get 'positions data))
+      (when (file-exists-p (javelin--cache-file-name))
+        (delete-file (javelin--cache-file-name)))
+      '())))
 
 (defun javelin--write-javelin-positions (data)
   "Write DATA to the javelin JSON file.
-DATA should be a list of alists with `javelin_position' and `filepath' keys.
-Entries are sorted by `javelin_position' in increasing order before writing.
-Creates the cache file if it does not exist.
+DATA should be a list of alists with `javelin_position', `filepath',
+and `point' keys.  Entries are sorted by `javelin_position' in increasing
+order before writing.  Creates the cache file if it does not exist.
 If DATA is empty, deletes the cache file instead."
   (if (null data)
       (when (file-exists-p (javelin--cache-file-name))
         (delete-file (javelin--cache-file-name)))
     (javelin--ensure-cache-file)
-    (write-region (json-serialize (vconcat (javelin--sort-positions data))) nil (javelin--cache-file-name))))
+    (let ((cache-data `((version . ,javelin--cache-version)
+                        (positions . ,(vconcat (javelin--sort-positions data))))))
+      (write-region (json-serialize cache-data) nil (javelin--cache-file-name)))))
+
+(defun javelin--get-entry-by-position (javelin-position)
+  "Get the full entry alist for a given JAVELIN-POSITION.
+Returns nil if not found.
+Entry contains `javelin_position', `filepath', and `point' keys."
+  (let ((data (javelin--read-javelin-positions)))
+    (seq-find (lambda (item)
+                (= (alist-get 'javelin_position item) javelin-position))
+              data)))
 
 (defun javelin--get-filepath-by-position (javelin-position)
   "Get the filepath for a given JAVELIN-POSITION.
 Returns nil if not found."
-  (let ((data (javelin--read-javelin-positions)))
-    (alist-get 'filepath
-               (seq-find (lambda (item)
-                           (= (alist-get 'javelin_position item) javelin-position))
-                         data))))
+  (alist-get 'filepath (javelin--get-entry-by-position javelin-position)))
 
-(defun javelin--set-filepath-by-position (javelin-position filepath)
-  "Set FILEPATH for a given JAVELIN-POSITION.
-Updates existing entry or adds a new one."
+(defun javelin--set-entry-by-position (javelin-position filepath pos)
+  "Set FILEPATH and POS for a given JAVELIN-POSITION.
+Updates existing entry or adds a new one.
+Also creates a marker at POS in the current buffer and caches it."
   (let* ((data (javelin--read-javelin-positions))
          (existing (seq-find (lambda (item)
                                (= (alist-get 'javelin_position item) javelin-position))
                              data)))
     (if existing
         ;; Update existing entry
-        (setf (alist-get 'filepath existing) filepath)
+        (progn
+          (setf (alist-get 'filepath existing) filepath)
+          (setf (alist-get 'point existing) pos))
       ;; Add new entry
-      (push `((javelin_position . ,javelin-position) (filepath . ,filepath)) data))
-    (javelin--write-javelin-positions data)))
+      (push `((javelin_position . ,javelin-position) (filepath . ,filepath) (point . ,pos)) data))
+    (javelin--write-javelin-positions data)
+    ;; Create and cache a marker for this position
+    (let ((marker (make-marker)))
+      (set-marker marker pos (current-buffer))
+      (puthash (cons filepath javelin-position) marker javelin--markers))))
 
 (defun javelin--remove-filepath-by-position (javelin-position)
   "Remove entry with JAVELIN-POSITION from the javelin list."
@@ -227,208 +264,239 @@ For non-file buffers, returns the buffer name."
 
 ;;;###autoload
 (defun javelin-go-to (javelin-number)
-  "Go to specific file or buffer on javelin by JAVELIN-NUMBER."
-  (let* ((name (javelin--get-filepath-by-position javelin-number))
+  "Go to specific file or buffer of the javelin by JAVELIN-NUMBER.
+If already in the target buffer, just navigate to the saved position.
+Uses markers for live position tracking within a session."
+  (let* ((entry (javelin--get-entry-by-position javelin-number))
+         (name (alist-get 'filepath entry))
+         (saved-point (alist-get 'point entry))
          (project-root (javelin--get-project-root))
          (full-file-name (when name
                            (if project-root
                                (concat project-root name)
-                             name))))
+                             name)))
+         (marker-key (when name (cons name javelin-number)))
+         (cached-marker (when marker-key (gethash marker-key javelin--markers)))
+         (target-pos (cond
+                      ;; Use cached marker if it's valid (buffer still exists)
+                      ((and cached-marker (marker-buffer cached-marker))
+                       cached-marker)
+                      ;; Fall back to saved point
+                      (saved-point saved-point)
+                      ;; Default to beginning of buffer
+                      (t 1))))
     (cond
      ((null name)
       (message "No file javelined to position %d" javelin-number))
-     ((file-exists-p full-file-name)
-      (find-file full-file-name))
+     ;; Already in the target buffer - just go to position
+     ((and full-file-name
+           (buffer-file-name)
+           (string= (expand-file-name full-file-name)
+                    (expand-file-name (buffer-file-name))))
+      (goto-char (if (markerp target-pos) (marker-position target-pos) target-pos)))
+     ;; File exists - open it and go to position
+     ((and full-file-name (file-exists-p full-file-name))
+      (find-file full-file-name)
+      (goto-char (if (markerp target-pos) (marker-position target-pos) target-pos))
+      ;; Create a marker for future jumps in this session if we used a raw point
+      (unless (markerp target-pos)
+        (let ((marker (make-marker)))
+          (set-marker marker (point) (current-buffer))
+          (puthash marker-key marker javelin--markers))))
+     ;; Buffer exists (non-file buffer)
      ((get-buffer name)
-      (switch-to-buffer name))
+      (switch-to-buffer name)
+      (goto-char (if (markerp target-pos) (marker-position target-pos) target-pos))
+      ;; Create a marker for future jumps in this session if we used a raw point
+      (unless (markerp target-pos)
+        (let ((marker (make-marker)))
+          (set-marker marker (point) (current-buffer))
+          (puthash marker-key marker javelin--markers))))
      (t
       (message "%s not found." name)))))
 
 ;;;###autoload
 (defun javelin-go-to-1 ()
-  "Go to file 1 on javelin."
+  "Go to the buffer at position 1 of the javelin."
   (interactive)
   (javelin-go-to 1))
 
 ;;;###autoload
 (defun javelin-go-to-2 ()
-  "Go to file 2 on javelin."
+  "Go to the buffer at position 2 of the javelin."
   (interactive)
   (javelin-go-to 2))
 
 ;;;###autoload
 (defun javelin-go-to-3 ()
-  "Go to file 3 on javelin."
+  "Go to the buffer at position 3 of the javelin."
   (interactive)
   (javelin-go-to 3))
 
 ;;;###autoload
 (defun javelin-go-to-4 ()
-  "Go to file 4 on javelin."
+  "Go to the buffer at position 4 of the javelin."
   (interactive)
   (javelin-go-to 4))
 
 ;;;###autoload
 (defun javelin-go-to-5 ()
-  "Go to file 5 on javelin."
+  "Go to the buffer at position 5 of the javelin."
   (interactive)
   (javelin-go-to 5))
 
 ;;;###autoload
 (defun javelin-go-to-6 ()
-  "Go to file 6 on javelin."
+  "Go to the buffer at position 6 of the javelin."
   (interactive)
   (javelin-go-to 6))
 
 ;;;###autoload
 (defun javelin-go-to-7 ()
-  "Go to file 7 on javelin."
+  "Go to the buffer at position 7 of the javelin."
   (interactive)
   (javelin-go-to 7))
 
 ;;;###autoload
 (defun javelin-go-to-8 ()
-  "Go to file 8 on javelin."
+  "Go to the buffer at position 8 of the javelin."
   (interactive)
   (javelin-go-to 8))
 
 ;;;###autoload
 (defun javelin-go-to-9 ()
-  "Go to file 9 on javelin."
+  "Go to the buffer at position 9 of the javelin."
   (interactive)
   (javelin-go-to 9))
-
-;;; --- Go-to functions ---
 
 ;;; --- Delete functions ---
 
 ;;;###autoload
 (defun javelin-delete (javelin-number)
-  "Delete an item on javelin. JAVELIN-NUMBER: Position to delete."
+  "Delete an item of the javelin. JAVELIN-NUMBER: Position to delete."
   (javelin--remove-filepath-by-position javelin-number)
   (message "Deleted javelin position %d" javelin-number))
 
 ;;;###autoload
 (defun javelin-delete-1 ()
-  "Delete item javelin on position 1."
+  "Delete position 1 of the javelin."
   (interactive)
   (javelin-delete 1))
 
 ;;;###autoload
 (defun javelin-delete-2 ()
-  "Delete item javelin on position 2."
+  "Delete position 2 of the javelin."
   (interactive)
   (javelin-delete 2))
 
 ;;;###autoload
 (defun javelin-delete-3 ()
-  "Delete item javelin on position 3."
+  "Delete position 3 of the javelin."
   (interactive)
   (javelin-delete 3))
 
 ;;;###autoload
 (defun javelin-delete-4 ()
-  "Delete item javelin on position 4."
+  "Delete position 4 of the javelin."
   (interactive)
   (javelin-delete 4))
 
 ;;;###autoload
 (defun javelin-delete-5 ()
-  "Delete item javelin on position 5."
+  "Delete position 5 of the javelin."
   (interactive)
   (javelin-delete 5))
 
 ;;;###autoload
 (defun javelin-delete-6 ()
-  "Delete item javelin on position 6."
+  "Delete position 6 of the javelin."
   (interactive)
   (javelin-delete 6))
 
 ;;;###autoload
 (defun javelin-delete-7 ()
-  "Delete item javelin on position 7."
+  "Delete position 7 of the javelin."
   (interactive)
   (javelin-delete 7))
 
 ;;;###autoload
 (defun javelin-delete-8 ()
-  "Delete item javelin on position 8."
+  "Delete position 8 of the javelin."
   (interactive)
   (javelin-delete 8))
 
 ;;;###autoload
 (defun javelin-delete-9 ()
-  "Delete item javelin on position 9."
+  "Delete position 9 of the javelin."
   (interactive)
   (javelin-delete 9))
-
-;;; --- Delete functions ---
 
 ;;; --- Assign to functions ---
 
 ;;;###autoload
 (defun javelin-assign-to (javelin-number)
   "Assign the current buffer to a specific position in javelin.
-JAVELIN-NUMBER: The position (1-9) to assign the current file to."
-  (let ((file-to-add (javelin--buffer-filepath-relative-to-root)))
-    (javelin--set-filepath-by-position javelin-number file-to-add)
-    (message "Assigned %s to javelin position %d" file-to-add javelin-number)))
+JAVELIN-NUMBER: The position (1-9) to assign the current buffer to.
+Also records the current point position for later navigation."
+  (let ((file-to-add (javelin--buffer-filepath-relative-to-root))
+        (current-pos (point)))
+    (javelin--set-entry-by-position javelin-number file-to-add current-pos)
+    (message "Assigned %s:%d to javelin position %d"
+             file-to-add (line-number-at-pos current-pos) javelin-number)))
 
 ;;;###autoload
 (defun javelin-assign-to-1 ()
-  "Assign current buffer to position 1 on javelin."
+  "Assign current buffer to position 1 of the javelin."
   (interactive)
   (javelin-assign-to 1))
 
 ;;;###autoload
 (defun javelin-assign-to-2 ()
-  "Assign current buffer to position 2 on javelin."
+  "Assign current buffer to position 2 of the javelin."
   (interactive)
   (javelin-assign-to 2))
 
 ;;;###autoload
 (defun javelin-assign-to-3 ()
-  "Assign current buffer to position 3 on javelin."
+  "Assign current buffer to position 3 of the javelin."
   (interactive)
   (javelin-assign-to 3))
 
 ;;;###autoload
 (defun javelin-assign-to-4 ()
-  "Assign current buffer to position 4 on javelin."
+  "Assign current buffer to position 4 of the javelin."
   (interactive)
   (javelin-assign-to 4))
 
 ;;;###autoload
 (defun javelin-assign-to-5 ()
-  "Assign current buffer to position 5 on javelin."
+  "Assign current buffer to position 5 of the javelin."
   (interactive)
   (javelin-assign-to 5))
 
 ;;;###autoload
 (defun javelin-assign-to-6 ()
-  "Assign current buffer to position 6 on javelin."
+  "Assign current buffer to position 6 of the javelin."
   (interactive)
   (javelin-assign-to 6))
 
 ;;;###autoload
 (defun javelin-assign-to-7 ()
-  "Assign current buffer to position 7 on javelin."
+  "Assign current buffer to position 7 of the javelin."
   (interactive)
   (javelin-assign-to 7))
 
 ;;;###autoload
 (defun javelin-assign-to-8 ()
-  "Assign current buffer to position 8 on javelin."
+  "Assign current buffer to position 8 of the javelin."
   (interactive)
   (javelin-assign-to 8))
 
 ;;;###autoload
 (defun javelin-assign-to-9 ()
-  "Assign current buffer to position 9 on javelin."
+  "Assign current buffer to position 9 of the javelin."
   (interactive)
   (javelin-assign-to 9))
-
-;;; --- Assign to functions ---
 
 ;;;###autoload
 (defun javelin-go-or-assign-to (javelin-number &optional force)
@@ -439,76 +507,72 @@ With FORCE (or prefix arg \\[universal-argument]), always assign even if positio
       (javelin-go-to javelin-number)
     (javelin-assign-to javelin-number)))
 
-;;; --- Go or assign to functions ---
+;;;###autoload
+(defun javelin-go-or-assign-to-1 (&optional force)
+  "Go to or assign position 1 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 1 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-1 ()
-  "Go to position 1 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 1 current-prefix-arg))
+(defun javelin-go-or-assign-to-2 (&optional force)
+  "Go to or assign position 2 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 2 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-2 ()
-  "Go to position 2 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 2 current-prefix-arg))
+(defun javelin-go-or-assign-to-3 (&optional force)
+  "Go to or assign position 3 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 3 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-3 ()
-  "Go to position 3 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 3 current-prefix-arg))
+(defun javelin-go-or-assign-to-4 (&optional force)
+  "Go to or assign position 4 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 4 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-4 ()
-  "Go to position 4 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 4 current-prefix-arg))
+(defun javelin-go-or-assign-to-5 (&optional force)
+  "Go to or assign position 5 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 5 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-5 ()
-  "Go to position 5 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 5 current-prefix-arg))
+(defun javelin-go-or-assign-to-6 (&optional force)
+  "Go to or assign position 6 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 6 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-6 ()
-  "Go to position 6 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 6 current-prefix-arg))
+(defun javelin-go-or-assign-to-7 (&optional force)
+  "Go to or assign position 7 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 7 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-7 ()
-  "Go to position 7 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 7 current-prefix-arg))
+(defun javelin-go-or-assign-to-8 (&optional force)
+  "Go to or assign position 8 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 8 force))
 
 ;;;###autoload
-(defun javelin-go-or-assign-to-8 ()
-  "Go to position 8 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 8 current-prefix-arg))
-
-;;;###autoload
-(defun javelin-go-or-assign-to-9 ()
-  "Go to position 9 if occupied, otherwise assign current buffer to it.
-With prefix arg \\[universal-argument], always assign even if position is occupied."
-  (interactive)
-  (javelin-go-or-assign-to 9 current-prefix-arg))
-
-;;; --- Go or assign to functions ---
+(defun javelin-go-or-assign-to-9 (&optional force)
+  "Go to or assign position 9 of the javelin.
+With FORCE (or prefix arg \\[universal-argument]), always assign."
+  (interactive "P")
+  (javelin-go-or-assign-to 9 force))
 
 ;;;###autoload
 (defun javelin-go-to-next ()
-  "Go to the next file in javelin."
+  "Go to the next buffer in javelin."
   (interactive)
   (let* ((data (javelin--read-javelin-positions))
          (files (mapcar (lambda (item) (alist-get 'filepath item)) data))
@@ -521,7 +585,7 @@ With prefix arg \\[universal-argument], always assign even if position is occupi
 
 ;;;###autoload
 (defun javelin-go-to-prev ()
-  "Go to the previous file in javelin."
+  "Go to the previous buffer in javelin."
   (interactive)
   (let* ((data (javelin--read-javelin-positions))
          (files (mapcar (lambda (item) (alist-get 'filepath item)) data))
@@ -534,29 +598,45 @@ With prefix arg \\[universal-argument], always assign even if position is occupi
 
 ;;;###autoload
 (defun javelin-add-file ()
-  "Add current file to javelin."
+  "Add current buffer to javelin at the next available position.
+Also records the current point position for later navigation."
   (interactive)
   (let* ((file-to-add (javelin--buffer-filepath-relative-to-root))
+         (current-pos (point))
          (data (javelin--read-javelin-positions))
          (existing (seq-find (lambda (item)
                                (string= (alist-get 'filepath item) file-to-add))
                              data)))
     (if existing
-        (message "This file is already on javelin.")
+        (message "This buffer is already marked in javelin.")
       (let ((next-num (javelin--next-available-position)))
-        (javelin--set-filepath-by-position next-num file-to-add)
-        (message "File added to javelin at position %d." next-num)))))
+        (javelin--set-entry-by-position next-num file-to-add current-pos)
+        (message "Buffer added to javelin at position %d." next-num)))))
 
 ;;;###autoload
 (defun javelin-toggle-quick-menu ()
-  "Open quick menu to select a javelined file."
+  "Open quick menu to select a javelined buffer."
   (interactive)
   (let* ((data (javelin--read-javelin-positions))
+         (project-root (javelin--get-project-root))
          (candidates (mapcar (lambda (item)
-                               (cons (format "%d: %s"
-                                             (alist-get 'javelin_position item)
-                                             (alist-get 'filepath item))
-                                     item))
+                               (let* ((filepath (alist-get 'filepath item))
+                                      (pos (alist-get 'point item))
+                                      (full-path (if project-root
+                                                     (concat project-root filepath)
+                                                   filepath))
+                                      ;; Calculate line number from point
+                                      (line-num (if (and pos (file-exists-p full-path))
+                                                    (with-temp-buffer
+                                                      (insert-file-contents full-path)
+                                                      (goto-char (min pos (point-max)))
+                                                      (line-number-at-pos))
+                                                  1)))
+                                 (cons (format "%d: %s:%d"
+                                               (alist-get 'javelin_position item)
+                                               filepath
+                                               line-num)
+                                       item)))
                              data))
          (candidate-strings (mapcar #'car candidates))
          ;; Completion table that preserves order (disables sorting)
@@ -572,7 +652,7 @@ With prefix arg \\[universal-argument], always assign even if position is occupi
 (defun javelin-clear ()
   "Clear all javelin positions."
   (interactive)
-  (when (yes-or-no-p "Do you really want to clear javelin all javelin positions?")
+  (when (yes-or-no-p "Do you really want to clear all javelin positions?")
     (javelin--write-javelin-positions '())
     (message "Javelin positions cleaned.")))
 
@@ -602,7 +682,6 @@ With prefix arg \\[universal-argument], always assign even if position is occupi
     (define-key map (kbd "M-8") #'javelin-go-or-assign-to-8)
     (define-key map (kbd "M-9") #'javelin-go-or-assign-to-9)
     ;; Delete position (M-0 prefix)
-    (define-key delete-map (kbd "0") #'javelin-clear)
     (define-key delete-map (kbd "1") #'javelin-delete-1)
     (define-key delete-map (kbd "2") #'javelin-delete-2)
     (define-key delete-map (kbd "3") #'javelin-delete-3)
@@ -612,6 +691,7 @@ With prefix arg \\[universal-argument], always assign even if position is occupi
     (define-key delete-map (kbd "7") #'javelin-delete-7)
     (define-key delete-map (kbd "8") #'javelin-delete-8)
     (define-key delete-map (kbd "9") #'javelin-delete-9)
+    (define-key delete-map (kbd "0") #'javelin-clear)
     (define-key map (kbd "M-0") delete-map)
     ;; Quick menu
     (define-key map (kbd "M--") #'javelin-toggle-quick-menu)
@@ -620,8 +700,8 @@ With prefix arg \\[universal-argument], always assign even if position is occupi
 
 ;;;###autoload
 (define-minor-mode javelin-minor-mode
-  "Minor mode for quick file navigation with javelin.
-Provides keybindings for jumping to javelined files:
+  "Minor mode for quick buffer navigation with javelin.
+Provides keybindings for jumping to javelined buffers:
   M-1 to M-9: Go to position (or assign if empty, \\[universal-argument] to force assign)
   M-0 0: Clear all positions
   M-0 1-9: Delete position
