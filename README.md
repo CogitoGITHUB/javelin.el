@@ -1,8 +1,8 @@
 # Javelin.el
 
-Quick file bookmarks for Emacs, inspired by [ThePrimeagen's Harpoon](https://github.com/ThePrimeagen/harpoon).
+Quick file and buffer bookmarking for Emacs, inspired by [ThePrimeagen's Harpoon](https://github.com/ThePrimeagen/harpoon).
 
-Pin files to numbered positions (1-9) for instant access. Positions are automatically separated by project and git branch.
+Pin bookmarks to numbered javelin positions (1-9) for instant access. Javelin positions are automatically separated by project and git branch.
 
 <p align="center">
 
@@ -39,16 +39,22 @@ In `config.el`:
 
 | Key | Action |
 |-----|--------|
-| `M-1` to `M-9` | Jump to file (or assign if empty) |
-| `C-u M-1` ... | Assign current file to position |
+| `M-1` to `M-9` | Jump to buffer (or assign if empty) |
+| `C-u M-1` ... | Assign current buffer to position |
 | `M-0 1` to `M-0 9` | Delete position |
-| `M--` | Quick menu to select from all javelined files |
+| `M--` | Quick menu to select from all javelined buffers |
+
+## Key Features
+
+- Jump to any pinned buffer with a single keystroke (M-1 through M-9)
+- Javelin positions remember your cursor position when pinning so that jumping restores you exactly right back there
+- Javelin positions are automatically scoped to each project and git branch, keeping your bookmarks organized
 
 ## Commands
 
-- `javelin-add-file` - Add current file to next available position
-- `javelin-toggle-quick-menu` - Select from javelined files
-- `javelin-go-to-next` / `javelin-go-to-prev` - Cycle through files
+- `javelin-add-file` - Add current buffer to next available position
+- `javelin-toggle-quick-menu` - Select from javelined buffers
+- `javelin-go-to-next` / `javelin-go-to-prev` - Cycle through javelined buffers
 - `javelin-clear` - Clear all positions
 
 ---
