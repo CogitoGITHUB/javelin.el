@@ -6,7 +6,7 @@
 ;; Author: Damian Barabonkov
 ;; Keywords: tools languages
 ;; Homepage: https://github.com/DamianB-BitFlipper/javelin.el
-;; Version: 0.2.0
+;; Version: 0.2.1
 ;; Package-Requires: ((emacs "28.1"))
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -116,11 +116,10 @@ Returns nil if not in a git repository."
    ((eq javelin-git-branch-provider 'magit)
     (magit-get-current-branch))
    ((eq javelin-git-branch-provider 'git)
-    (condition-case nil
-        (string-trim
-         (shell-command-to-string
-          (concat "cd " (javelin--get-project-root) "; git rev-parse --abbrev-ref HEAD")))
-      (error nil)))))
+    (let ((default-directory (javelin--get-project-root)))
+      (with-temp-buffer
+        (when (zerop (call-process "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD"))
+          (string-trim (buffer-string))))))))
 
 (defun javelin--cache-key ()
   "Key to save current file on cache.
