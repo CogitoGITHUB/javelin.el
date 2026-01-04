@@ -69,9 +69,7 @@ for different contexts."
   "Project provider to use for getting project root.
 Can be `projectile' or `project'.")
 
-(defvar javelin-git-branch-provider (if (featurep 'magit) 'magit 'git)
-  "Git branch provider to use for getting current branch.
-Can be `magit' or `git'.")
+
 
 (defvar javelin--markers (make-hash-table :test 'equal)
   "Hash table mapping (filepath . javelin-position) to markers.
@@ -110,16 +108,14 @@ Returns the project name as a string, or nil if there is no project."
 
 (defun javelin--get-branch-name ()
   "Get the branch name for javelin.
-Uses `javelin-git-branch-provider' to determine the method.
+Uses magit if available, otherwise falls back to git CLI.
 Returns nil if not in a git repository."
-  (cond
-   ((eq javelin-git-branch-provider 'magit)
-    (magit-get-current-branch))
-   ((eq javelin-git-branch-provider 'git)
+  (if (featurep 'magit)
+      (magit-get-current-branch)
     (let ((default-directory (javelin--get-project-root)))
       (with-temp-buffer
         (when (zerop (call-process "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD"))
-          (string-trim (buffer-string))))))))
+          (string-trim (buffer-string)))))))
 
 (defun javelin--cache-key ()
   "Key to save current file on cache.
