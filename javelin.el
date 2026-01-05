@@ -129,12 +129,8 @@ Returns nil if not in a git repository."
           (push (cons (string-to-number (match-string 1 name)) name) positions))))
     (seq-sort-by #'car #'< positions)))
 
-(defun javelin--bookmark-record (javelin-position)
-  "Return the bookmark record for JAVELIN-POSITION, or nil."
-  (bookmark-get-bookmark (javelin--bookmark-name javelin-position) 'noerror))
-
 (defun javelin--position-for-current-buffer ()
-  "Return the javelin position for the current buffer, or nil." 
+  "Return the javelin position for the current buffer, or nil."
   (let ((current-file (buffer-file-name))
         (current-buffer-name (buffer-name))
         (positions (javelin--bookmark-positions))
@@ -161,15 +157,6 @@ Returns nil if not in a git repository."
         file))
      (buffer-name buffer-name)
      (t "<unknown>"))))
-
-(defun javelin--next-available-position ()
-  "Get the next available javelin position.
-Scans positions 1-9 and returns the first gap found.
-Returns nil if all positions 1-9 are taken."
-  (let ((taken (mapcar #'car (javelin--bookmark-positions))))
-    (cl-loop for pos from 1 to 9
-             unless (member pos taken)
-             return pos)))
 
 ;;; --- Go-to functions ---
 
@@ -376,10 +363,12 @@ JAVELIN-NUMBER: The position (1-9) to assign the current buffer to."
 (defun javelin-go-or-assign-to (javelin-number &optional force)
   "Go to javelin position if occupied, otherwise assign current buffer to it.
 JAVELIN-NUMBER: The position (1-9) to go to or assign.
-With FORCE (or prefix arg \\[universal-argument]), always assign even if position is occupied."
-  (if (and (not force) (javelin--bookmark-record javelin-number))
+With FORCE (or prefix arg \[universal-argument]), always assign even if position is occupied."
+  (if (and (not force)
+           (bookmark-get-bookmark (javelin--bookmark-name javelin-number) 'noerror))
       (javelin-go-to javelin-number)
     (javelin-assign-to javelin-number)))
+
 
 ;;;###autoload
 (defun javelin-go-or-assign-to-1 (&optional force)
@@ -475,7 +464,12 @@ DIRECTION should be 1 for next, -1 for previous."
   (interactive)
   (if (javelin--position-for-current-buffer)
       (message "This buffer is already marked in javelin.")
-    (let ((next-num (javelin--next-available-position)))
+    (let ((taken (mapcar #'car (javelin--bookmark-positions)))
+          next-num)
+      (setq next-num
+            (cl-loop for pos from 1 to 9
+                     unless (member pos taken)
+                     return pos))
       (if (null next-num)
           (message "All javelin positions are already assigned.")
         (javelin-assign-to next-num)))))
@@ -574,7 +568,7 @@ Provides keybindings for jumping to javelined buffers:
   M-0 0: Clear all positions
   M-0 1-9: Delete position
   M--: Toggle quick menu"
-  :lighter " Harp"
+  :lighter " Jav"
   :keymap javelin-minor-mode-map
   :global nil)
 
