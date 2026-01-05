@@ -2,6 +2,8 @@
 
 This guide is for [Doom Emacs](https://github.com/doomemacs/doomemacs) users.
 
+Please make sure this package continues to meet the [MELPA contributing guidelines](https://github.com/melpa/melpa/blob/master/CONTRIBUTING.org).
+
 ## Local Installation
 
 Add the following to your `packages.el`:
