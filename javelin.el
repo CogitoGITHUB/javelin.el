@@ -34,10 +34,9 @@
 (require 'subr-x)
 (require 'cl-lib)
 (require 'project)
+(require 'bookmark)
+(require 'vc-git)
 
-;; Since these are optional, simply declare the external functions
-;; that may or may not be available
-(declare-function magit-get-current-branch "magit")
 
 ;;; Code:
 
@@ -47,19 +46,14 @@
   "Organize bookmarks by project and branch."
   :group 'tools)
 
-(defcustom javelin-cache-dir (concat user-emacs-directory ".local/javelin/")
-  "Where the cache will be saved."
-  :type 'string)
-
 (defcustom javelin-separate-by-branch t
   "Javelin separated by branch."
   :type 'boolean)
 
 (defcustom javelin-default-positions-namespace "javelin"
   "Namespace for javelin positions when not in a project.
-Used as a fallback identifier for the cache file when javelin cannot
-detect a project root. The namespace helps isolate javelin positions
-for different contexts."
+Used as a fallback identifier when javelin cannot detect a project root.
+The namespace helps isolate javelin positions for different contexts."
   :type 'string)
 
 (defcustom javelin-disable-confirmation nil
@@ -67,15 +61,24 @@ for different contexts."
   :type 'boolean)
 ;;; --- Customizable variables ---
 
-(defvar javelin--markers (make-hash-table :test 'equal)
-  "Hash table mapping (filepath . javelin-position) to markers.
-Markers provide live position tracking within an Emacs session,
-automatically adjusting when text is inserted or deleted above them.")
+(defconst javelin--bookmark-prefix "javelin:"
+  "Prefix for javelin bookmark names.")
 
-(defconst javelin--cache-version 1
-  "Current version of the javelin cache file schema.
-Increment this when making incompatible changes to the cache format.
-Cache files with a different version will be deleted and recreated.")
+(defvar javelin--bookmarks-loaded nil
+  "Non-nil when javelin has loaded bookmark data.")
+
+(defun javelin--ensure-bookmarks-loaded ()
+  "Load the default bookmark file once if it exists."
+  (unless javelin--bookmarks-loaded
+    (setq javelin--bookmarks-loaded t)
+    (when (and (boundp 'bookmark-default-file)
+               (file-exists-p bookmark-default-file))
+      (bookmark-load bookmark-default-file t))))
+
+(defun javelin--bookmark-save-silent ()
+  "Save bookmarks without emitting messages."
+  (let ((inhibit-message t))
+    (bookmark-save)))
 
 (defun javelin--get-project-root ()
   "Get the project root.
@@ -98,207 +101,87 @@ Returns the project name as a string, or nil if there is no project."
 
 (defun javelin--get-branch-name ()
   "Get the branch name for javelin.
-Uses magit if available, otherwise falls back to git CLI.
 Returns nil if not in a git repository."
-  (if (featurep 'magit)
-      (magit-get-current-branch)
-    (let ((default-directory (javelin--get-project-root)))
-      (with-temp-buffer
-        (when (zerop (call-process "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD"))
-          (string-trim (buffer-string)))))))
+  (car (vc-git-branches)))
 
-(defun javelin--cache-key ()
-  "Key to save current file on cache.
-Returns `javelin-default-positions-namespace' if there is no project."
-  ;; Use `url-hexify-string' to percent-encode the cache key, making it
-  ;; filename-friendly by escaping "/" and other forbidden characters.
+(defun javelin--bookmark-namespace ()
+  "Namespace for javelin bookmark names."
   (let ((project-name (or (javelin--get-project-name) javelin-default-positions-namespace)))
-    (url-hexify-string
-     (if-let ((branch (and javelin-separate-by-branch (javelin--get-branch-name))))
-         (concat project-name "#" branch)
-       project-name))))
+    (if-let ((branch (and javelin-separate-by-branch (javelin--get-branch-name))))
+        (format "%s#%s" project-name branch)
+      project-name)))
 
-(defun javelin--cache-file-name ()
-  "File name for javelin on current project."
-  (concat javelin-cache-dir (javelin--cache-key) ".json"))
+(defun javelin--bookmark-name (javelin-position)
+  "Bookmark name for JAVELIN-POSITION."
+  (format "%s%s:%d" javelin--bookmark-prefix (javelin--bookmark-namespace) javelin-position))
 
-(defun javelin--ensure-cache-file ()
-  "Create javelin cache dir and file if they don't exist."
-  (unless (file-directory-p javelin-cache-dir)
-    (make-directory javelin-cache-dir t))
-  (unless (file-exists-p (javelin--cache-file-name))
-    (write-region (json-serialize '()) nil (javelin--cache-file-name))))
+(defun javelin--bookmark-positions ()
+  "Return list of (position . bookmark-name) in the current namespace."
+  (javelin--ensure-bookmarks-loaded)
+  (let* ((namespace (javelin--bookmark-namespace))
+         (pattern (format "^%s%s:\\([1-9]\\)$"
+                          (regexp-quote javelin--bookmark-prefix)
+                          (regexp-quote namespace)))
+         (positions nil))
+    (dolist (bm bookmark-alist)
+      (let ((name (car bm)))
+        (when (string-match pattern name)
+          (push (cons (string-to-number (match-string 1 name)) name) positions))))
+    (seq-sort-by #'car #'< positions)))
 
-(defun javelin--sort-positions (data)
-  "Sort DATA by `javelin_position' in increasing order."
-  (seq-sort (lambda (a b)
-              (< (alist-get 'javelin_position a)
-                 (alist-get 'javelin_position b)))
-            data))
+(defun javelin--bookmark-record (javelin-position)
+  "Return the bookmark record for JAVELIN-POSITION, or nil."
+  (bookmark-get-bookmark (javelin--bookmark-name javelin-position) 'noerror))
 
-(defun javelin--cache-compatible-p (data)
-  "Check if DATA from cache file is compatible with the current schema.
-Returns non-nil if compatible, nil otherwise."
-  (and data
-       (listp data)
-       (alist-get 'version data)
-       (= (alist-get 'version data) javelin--cache-version)))
+(defun javelin--position-for-current-buffer ()
+  "Return the javelin position for the current buffer, or nil." 
+  (let ((current-file (buffer-file-name))
+        (current-buffer-name (buffer-name))
+        (positions (javelin--bookmark-positions))
+        found)
+    (dolist (pair positions)
+      (let* ((record (bookmark-get-bookmark (cdr pair) 'noerror))
+             (file (and record (bookmark-get-filename record)))
+             (buffer-name (and record (bookmark-prop-get record 'buffer-name))))
+        (when (or (and file current-file
+                       (string= (expand-file-name file) (expand-file-name current-file)))
+                  (and (null file) buffer-name (string= buffer-name current-buffer-name)))
+          (setq found (car pair)))))
+    found))
 
-(defun javelin--read-javelin-positions ()
-  "Read and parse the javelin positions cache JSON file.
-Returns a list of alists with `javelin_position', `filepath', and `point' keys.
-If the cache file is incompatible, it is deleted and an empty list is returned."
-  (let ((data (if (file-exists-p (javelin--cache-file-name))
-                  (condition-case nil
-		      (with-temp-buffer
-			(insert-file-contents (javelin--cache-file-name))
-			(goto-char (point-min))
-			(json-parse-buffer :object-type 'alist
-                                           :array-type 'list))
-                    ;; JSON file got corrupted, delete it and return empty list
-                    (error
-                     (delete-file (javelin--cache-file-name))
-                     nil))
-                nil)))
-    (if (javelin--cache-compatible-p data)
-        (javelin--sort-positions (alist-get 'positions data))
-      (when (file-exists-p (javelin--cache-file-name))
-        (delete-file (javelin--cache-file-name)))
-      '())))
-
-(defun javelin--write-javelin-positions (data)
-  "Write DATA to the javelin JSON file.
-DATA should be a list of alists with `javelin_position', `filepath',
-and `point' keys.  Entries are sorted by `javelin_position' in increasing
-order before writing.  Creates the cache file if it does not exist.
-If DATA is empty, deletes the cache file instead."
-  (if (null data)
-      (when (file-exists-p (javelin--cache-file-name))
-        (delete-file (javelin--cache-file-name)))
-    (javelin--ensure-cache-file)
-    (let ((cache-data `((version . ,javelin--cache-version)
-                        (positions . ,(vconcat (javelin--sort-positions data))))))
-      (write-region (json-serialize cache-data) nil (javelin--cache-file-name)))))
-
-(defun javelin--get-entry-by-position (javelin-position)
-  "Get the full entry alist for a given JAVELIN-POSITION.
-Returns nil if not found.
-Entry contains `javelin_position', `filepath', and `point' keys."
-  (let ((data (javelin--read-javelin-positions)))
-    (seq-find (lambda (item)
-                (= (alist-get 'javelin_position item) javelin-position))
-              data)))
-
-(defun javelin--get-filepath-by-position (javelin-position)
-  "Get the filepath for a given JAVELIN-POSITION.
-Returns nil if not found."
-  (alist-get 'filepath (javelin--get-entry-by-position javelin-position)))
-
-(defun javelin--set-entry-by-position (javelin-position filepath pos)
-  "Set FILEPATH and POS for a given JAVELIN-POSITION.
-Updates existing entry or adds a new one.
-Also creates a marker at POS in the current buffer and caches it."
-  (let* ((data (javelin--read-javelin-positions))
-         (existing (seq-find (lambda (item)
-                               (= (alist-get 'javelin_position item) javelin-position))
-                             data)))
-    (if existing
-        ;; Update existing entry
-        (progn
-          (setf (alist-get 'filepath existing) filepath)
-          (setf (alist-get 'point existing) pos))
-      ;; Add new entry
-      (push `((javelin_position . ,javelin-position) (filepath . ,filepath) (point . ,pos)) data))
-    (javelin--write-javelin-positions data)
-    ;; Create and cache a marker for this position
-    (let ((marker (make-marker)))
-      (set-marker marker pos (current-buffer))
-      (puthash (cons filepath javelin-position) marker javelin--markers))))
-
-(defun javelin--remove-filepath-by-position (javelin-position)
-  "Remove entry with JAVELIN-POSITION from the javelin list."
-  (let ((data (javelin--read-javelin-positions)))
-    (javelin--write-javelin-positions
-     (seq-remove (lambda (item)
-                   (= (alist-get 'javelin_position item) javelin-position))
-                 data))))
+(defun javelin--bookmark-display-target (record)
+  "Return a display-friendly target for RECORD."
+  (let* ((file (bookmark-get-filename record))
+         (buffer-name (bookmark-prop-get record 'buffer-name))
+         (project-root (javelin--get-project-root)))
+    (cond
+     (file
+      (if project-root
+          (file-relative-name file project-root)
+        file))
+     (buffer-name buffer-name)
+     (t "<unknown>"))))
 
 (defun javelin--next-available-position ()
   "Get the next available javelin position.
 Scans positions 1-9 and returns the first gap found.
 Returns nil if all positions 1-9 are taken."
-  (let ((data (javelin--read-javelin-positions)))
+  (let ((taken (mapcar #'car (javelin--bookmark-positions))))
     (cl-loop for pos from 1 to 9
-             unless (seq-find (lambda (item)
-                                (= (alist-get 'javelin_position item) pos))
-                              data)
+             unless (member pos taken)
              return pos)))
-
-(defun javelin--buffer-filepath-relative-to-root ()
-  "Get buffer file name relative to project root.
-Returns the relative path if in a project, otherwise the absolute path.
-For non-file buffers, returns the buffer name."
-  (if-let ((filepath (buffer-file-name)))
-      (let ((project-root (javelin--get-project-root)))
-        (if project-root
-            (file-relative-name filepath project-root)
-          filepath))
-    (buffer-name)))
 
 ;;; --- Go-to functions ---
 
 ;;;###autoload
 (defun javelin-go-to (javelin-number)
-  "Go to specific file or buffer of the javelin by JAVELIN-NUMBER.
-If already in the target buffer, just navigate to the saved position.
-Uses markers for live position tracking within a session."
-  (let* ((entry (javelin--get-entry-by-position javelin-number))
-         (name (alist-get 'filepath entry))
-         (saved-point (alist-get 'point entry))
-         (project-root (javelin--get-project-root))
-         (full-file-name (when name
-                           (if project-root
-                               (concat project-root name)
-                             name)))
-         (marker-key (when name (cons name javelin-number)))
-         (cached-marker (when marker-key (gethash marker-key javelin--markers)))
-         (target-pos (cond
-                      ;; Use cached marker if it's valid (buffer still exists)
-                      ((and cached-marker (marker-buffer cached-marker))
-                       cached-marker)
-                      ;; Fall back to saved point
-                      (saved-point saved-point)
-                      ;; Default to beginning of buffer
-                      (t 1))))
-    (cond
-     ((null name)
-      (message "No file javelined to position %d" javelin-number))
-     ;; Already in the target buffer - just go to position
-     ((and full-file-name
-           (buffer-file-name)
-           (string= (expand-file-name full-file-name)
-                    (expand-file-name (buffer-file-name))))
-      (goto-char (if (markerp target-pos) (marker-position target-pos) target-pos)))
-     ;; File exists - open it and go to position
-     ((and full-file-name (file-exists-p full-file-name))
-      (find-file full-file-name)
-      (goto-char (if (markerp target-pos) (marker-position target-pos) target-pos))
-      ;; Create a marker for future jumps in this session if we used a raw point
-      (unless (markerp target-pos)
-        (let ((marker (make-marker)))
-          (set-marker marker (point) (current-buffer))
-          (puthash marker-key marker javelin--markers))))
-     ;; Buffer exists (non-file buffer)
-     ((get-buffer name)
-      (switch-to-buffer name)
-      (goto-char (if (markerp target-pos) (marker-position target-pos) target-pos))
-      ;; Create a marker for future jumps in this session if we used a raw point
-      (unless (markerp target-pos)
-        (let ((marker (make-marker)))
-          (set-marker marker (point) (current-buffer))
-          (puthash marker-key marker javelin--markers))))
-     (t
-      (message "%s not found." name)))))
+  "Go to specific file or buffer of the javelin by JAVELIN-NUMBER."
+  (interactive "nJavelin position: ")
+  (javelin--ensure-bookmarks-loaded)
+  (let ((name (javelin--bookmark-name javelin-number)))
+    (if (bookmark-get-bookmark name 'noerror)
+        (bookmark-jump name)
+      (message "No file javelined to position %d" javelin-number))))
 
 ;;;###autoload
 (defun javelin-go-to-1 ()
@@ -359,8 +242,15 @@ Uses markers for live position tracking within a session."
 ;;;###autoload
 (defun javelin-delete (javelin-number)
   "Delete an item of the javelin. JAVELIN-NUMBER: Position to delete."
-  (javelin--remove-filepath-by-position javelin-number)
-  (message "Deleted javelin position %d" javelin-number))
+  (interactive "nJavelin position: ")
+  (javelin--ensure-bookmarks-loaded)
+  (let ((name (javelin--bookmark-name javelin-number)))
+    (if (bookmark-get-bookmark name 'noerror)
+        (progn
+          (bookmark-delete name)
+          (javelin--bookmark-save-silent)
+          (message "Deleted javelin position %d" javelin-number))
+      (message "No javelin position %d to delete" javelin-number))))
 
 ;;;###autoload
 (defun javelin-delete-1 ()
@@ -421,13 +311,12 @@ Uses markers for live position tracking within a session."
 ;;;###autoload
 (defun javelin-assign-to (javelin-number)
   "Assign the current buffer to a specific position in javelin.
-JAVELIN-NUMBER: The position (1-9) to assign the current buffer to.
-Also records the current point position for later navigation."
-  (let ((file-to-add (javelin--buffer-filepath-relative-to-root))
-        (current-pos (point)))
-    (javelin--set-entry-by-position javelin-number file-to-add current-pos)
-    (message "Assigned %s:%d to javelin position %d"
-             file-to-add (line-number-at-pos current-pos) javelin-number)))
+JAVELIN-NUMBER: The position (1-9) to assign the current buffer to."
+  (interactive "nJavelin position: ")
+  (javelin--ensure-bookmarks-loaded)
+  (bookmark-set (javelin--bookmark-name javelin-number))
+  (javelin--bookmark-save-silent)
+  (message "Assigned current buffer to javelin position %d" javelin-number))
 
 ;;;###autoload
 (defun javelin-assign-to-1 ()
@@ -488,7 +377,7 @@ Also records the current point position for later navigation."
   "Go to javelin position if occupied, otherwise assign current buffer to it.
 JAVELIN-NUMBER: The position (1-9) to go to or assign.
 With FORCE (or prefix arg \\[universal-argument]), always assign even if position is occupied."
-  (if (and (not force) (javelin--get-filepath-by-position javelin-number))
+  (if (and (not force) (javelin--bookmark-record javelin-number))
       (javelin-go-to javelin-number)
     (javelin-assign-to javelin-number)))
 
@@ -555,74 +444,56 @@ With FORCE (or prefix arg \\[universal-argument]), always assign."
   (interactive "P")
   (javelin-go-or-assign-to 9 force))
 
+(defun javelin--cycle-position (direction)
+  "Cycle to the next or previous javelin position.
+DIRECTION should be 1 for next, -1 for previous."
+  (let ((positions (mapcar #'car (javelin--bookmark-positions))))
+    (if (null positions)
+        (message "No javelin positions set.")
+      (let* ((current (javelin--position-for-current-buffer))
+             (current-index (or (cl-position current positions) -1))
+             (new-index (mod (+ current-index direction) (length positions)))
+             (new-pos (nth new-index positions)))
+        (when new-pos
+          (javelin-go-to new-pos))))))
+
 ;;;###autoload
 (defun javelin-go-to-next ()
   "Go to the next buffer in javelin."
   (interactive)
-  (let* ((data (javelin--read-javelin-positions))
-         (files (mapcar (lambda (item) (alist-get 'filepath item)) data))
-         (current-file (javelin--buffer-filepath-relative-to-root))
-         (current-index (or (cl-position current-file files :test 'string=) -1))
-         (next-index (mod (+ current-index 1) (length files)))
-         (next-item (nth next-index data)))
-    (when next-item
-      (javelin-go-to (alist-get 'javelin_position next-item)))))
+  (javelin--cycle-position 1))
 
 ;;;###autoload
 (defun javelin-go-to-prev ()
   "Go to the previous buffer in javelin."
   (interactive)
-  (let* ((data (javelin--read-javelin-positions))
-         (files (mapcar (lambda (item) (alist-get 'filepath item)) data))
-         (current-file (javelin--buffer-filepath-relative-to-root))
-         (current-index (or (cl-position current-file files :test 'string=) -1))
-         (prev-index (mod (+ current-index (length files) -1) (length files)))
-         (prev-item (nth prev-index data)))
-    (when prev-item
-      (javelin-go-to (alist-get 'javelin_position prev-item)))))
+  (javelin--cycle-position -1))
 
 ;;;###autoload
 (defun javelin-add-file ()
-  "Add current buffer to javelin at the next available position.
-Also records the current point position for later navigation."
+  "Add current buffer to javelin at the next available position."
   (interactive)
-  (let* ((file-to-add (javelin--buffer-filepath-relative-to-root))
-         (current-pos (point))
-         (data (javelin--read-javelin-positions))
-         (existing (seq-find (lambda (item)
-                               (string= (alist-get 'filepath item) file-to-add))
-                             data)))
-    (if existing
-        (message "This buffer is already marked in javelin.")
-      (let ((next-num (javelin--next-available-position)))
-        (javelin--set-entry-by-position next-num file-to-add current-pos)
-        (message "Buffer added to javelin at position %d." next-num)))))
+  (if (javelin--position-for-current-buffer)
+      (message "This buffer is already marked in javelin.")
+    (let ((next-num (javelin--next-available-position)))
+      (if (null next-num)
+          (message "All javelin positions are already assigned.")
+        (javelin-assign-to next-num)))))
 
 ;;;###autoload
 (defun javelin-toggle-quick-menu ()
   "Open quick menu to select a javelined buffer."
   (interactive)
-  (let* ((data (javelin--read-javelin-positions))
-         (project-root (javelin--get-project-root))
-         (candidates (mapcar (lambda (item)
-                               (let* ((filepath (alist-get 'filepath item))
-                                      (pos (alist-get 'point item))
-                                      (full-path (if project-root
-                                                     (concat project-root filepath)
-                                                   filepath))
-                                      ;; Calculate line number from point
-                                      (line-num (if (and pos (file-exists-p full-path))
-                                                    (with-temp-buffer
-                                                      (insert-file-contents full-path)
-                                                      (goto-char (min pos (point-max)))
-                                                      (line-number-at-pos))
-                                                  1)))
-                                 (cons (format "%d: %s:%d"
-                                               (alist-get 'javelin_position item)
-                                               filepath
-                                               line-num)
-                                       item)))
-                             data))
+  (let* ((pairs (javelin--bookmark-positions))
+         (candidates (mapcar (lambda (pair)
+                               (let* ((pos (car pair))
+                                      (bm-name (cdr pair))
+                                      (record (bookmark-get-bookmark bm-name 'noerror))
+                                      (display (if record
+                                                   (javelin--bookmark-display-target record)
+                                                 bm-name)))
+                                 (cons (format "%d: %s" pos display) pos)))
+                             pairs))
          (candidate-strings (mapcar #'car candidates))
          ;; Completion table that preserves order (disables sorting)
          (collection (lambda (string pred action)
@@ -630,8 +501,11 @@ Also records the current point position for later navigation."
                            '(metadata (display-sort-function . identity)
                              (cycle-sort-function . identity))
                          (complete-with-action action candidate-strings string pred)))))
-    (when-let ((selection (completing-read "Javelin to file: " collection)))
-      (javelin-go-to (alist-get 'javelin_position (cdr (assoc selection candidates)))))))
+    (if (null candidates)
+        (message "No javelin positions set.")
+      (when-let ((selection (completing-read "Javelin to file: " collection)))
+        (let ((pos (cdr (assoc selection candidates))))
+          (javelin-go-to pos))))))
 
 ;;;###autoload
 (defun javelin-clear ()
@@ -639,7 +513,9 @@ Also records the current point position for later navigation."
   (interactive)
   (when (or javelin-disable-confirmation
             (yes-or-no-p "Do you really want to clear all javelin positions?"))
-    (javelin--write-javelin-positions '())
+    (dolist (pair (javelin--bookmark-positions))
+      (bookmark-delete (cdr pair)))
+    (javelin--bookmark-save-silent)
     (message "Javelin positions cleaned.")))
 
 ;;;###autoload
@@ -648,10 +524,15 @@ Also records the current point position for later navigation."
   (interactive)
   (when (or javelin-disable-confirmation
             (yes-or-no-p "Do you really want to clear all javelin positions across all javelin projects? "))
-    (let ((files (directory-files javelin-cache-dir t "\\.json$")))
-      (dolist (file files)
-        (delete-file file))
-      (message "Deleted all javelin positions across %d project(s)." (length files)))))
+    (javelin--ensure-bookmarks-loaded)
+    (let ((deleted 0))
+      (dolist (bm bookmark-alist)
+        (let ((name (car bm)))
+          (when (string-prefix-p javelin--bookmark-prefix name)
+            (bookmark-delete name)
+            (setq deleted (1+ deleted)))))
+      (javelin--bookmark-save-silent)
+      (message "Deleted all javelin positions across %d project(s)." deleted))))
 
 ;;; --- Minor mode ---
 
